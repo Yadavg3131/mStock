@@ -1,4 +1,4 @@
-name: EOD Journal
+name: EOD Journal and upload the chart [MAIN]
 
 on:
   schedule:
