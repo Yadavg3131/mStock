@@ -7,6 +7,9 @@ import matplotlib.dates as mdates
 import matplotlib.ticker as ticker 
 import numpy as np
 import io
+import os
+import json
+import tempfile
 import time
 import urllib3
 from collections import defaultdict
@@ -16,7 +19,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ==========================================
 # ⚙️ CONFIGURATION
 # ==========================================
-IMGBB_API_KEY = "bc9bd3a639aec812b3b705bfcd7810ce"
+IMGBB_API_KEY = os.environ.get("IMGBB_API_KEY", "")
 
 SHEET_NAME = "Abhay"
 TAB_NAME = "mStock working"
@@ -45,12 +48,27 @@ EXCHANGE_SEGMENT_MAP = {
 # ==========================================
 # 🔐 1. AUTHENTICATE SHEETS
 # ==========================================
+
 def authenticate_google():
     print("🔐 Connecting to Google Workspace...")
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name("google_secret_key.json", scope)
+    
+    secret_json = os.environ.get("GOOGLE_SECRET_KEY")
+    if secret_json:
+        creds_dict = json.loads(secret_json)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    else:
+        creds = ServiceAccountCredentials.from_json_keyfile_name("google_secret_key.json", scope)
+    
     gc = gspread.authorize(creds)
     return gc
+          
+# def authenticate_google():
+    # print("🔐 Connecting to Google Workspace...")
+    # scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    # creds = ServiceAccountCredentials.from_json_keyfile_name("google_secret_key.json", scope)
+    # gc = gspread.authorize(creds)
+    # return gc
 
 # ==========================================
 # 📥 2. DOWNLOAD MASTER FILE
