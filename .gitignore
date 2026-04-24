@@ -1,0 +1,4 @@
+google_secret_key.json
+*.png
+__pycache__/
+*.pyc
