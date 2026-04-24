@@ -1,17 +1,56 @@
-
 name: EOD Journal
 
 on:
   schedule:
-    - cron: '15 10 * * 1-5'   # 15:45 IST (10:15 UTC), Mon-Fri
-  workflow_dispatch:           # Adds a "Run workflow" button in the Actions tab
+    # 15:45 IST (10:15 UTC), Monday–Friday.
+    # Note: GitHub schedules can run a few minutes late on shared runners.
+    - cron: '15 10 * * 1-5'
+  workflow_dispatch:
+
+# Prevent overlapping runs (e.g. manual dispatch during a scheduled run)
+# from writing to the same Google Sheet at the same time.
+concurrency:
+  group: eod-journal
+  cancel-in-progress: false
+
+# Principle of least privilege — this workflow does not touch the repo.
+permissions:
+  contents: read
 
 jobs:
   run-journal:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      TZ: Asia/Kolkata            # Logs print in IST
+      MPLBACKEND: Agg             # Headless matplotlib (no display server)
+      PYTHONUNBUFFERED: '1'       # Real-time log streaming
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        env:
+          GOOGLE_SECRET_JSON: ${{ secrets.GOOGLE_SECRET_JSON }}
+          IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+        run: |
+          missing=0
+          if [ -z "$GOOGLE_SECRET_JSON" ]; then
+            echo "::error title=Missing secret::GOOGLE_SECRET_JSON is not set"
+            missing=1
+          fi
+          if [ -z "$IMGBB_API_KEY" ]; then
+            echo "::error title=Missing secret::IMGBB_API_KEY is not set"
+            missing=1
+          fi
+          if [ "$missing" -eq 1 ]; then
+            echo "Add the missing secret(s) under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "All required secrets are present."
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -20,14 +59,44 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Write Google service-account key
-        run: echo "$GOOGLE_SECRET_JSON" > google_secret_key.json
         env:
           GOOGLE_SECRET_JSON: ${{ secrets.GOOGLE_SECRET_JSON }}
+        run: |
+          # printf %s avoids adding a trailing newline and preserves
+          # escaped characters inside the JSON — echo can mangle both.
+          printf '%s' "$GOOGLE_SECRET_JSON" > google_secret_key.json
+          chmod 600 google_secret_key.json
+          # Validate JSON before running the script — cheap and catches
+          # malformed secrets up front (saves ~20s of Python startup).
+          python -c "import json,sys; json.load(open('google_secret_key.json')); print('Credentials file parses as valid JSON.')"
 
       - name: Run EOD journal
+        id: run_journal
         env:
           IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
-        run: python generateChart.py
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          python -u generateChart.py 2>&1 | tee "logs/run-$(date +%Y%m%d-%H%M%S).log"
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eod-journal-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Clean up credential file
+        if: always()
+        run: |
+          # Remove the key even if an earlier step failed so it never
+          # persists in a self-hosted runner's working directory.
+          rm -f google_secret_key.json
+          echo "Credential file removed."
