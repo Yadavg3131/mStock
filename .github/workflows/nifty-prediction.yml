@@ -2,12 +2,12 @@ name: NIFTY Daily Prediction
 
 on:
   schedule:
-    # 08:30 IST (03:00 UTC), Monday–Friday — runs ~45min before NIFTY opens.
-    # Pre-market signals (S&P 500, Nikkei, DXY) are all in by this time.
+    # 08:30 IST (03:00 UTC), Monday–Friday
+    # S&P 500, DXY, US10Y all closed by this time. ~45min buffer before NIFTY opens.
     - cron: '0 3 * * 1-5'
   workflow_dispatch:
 
-# Don't let a manual run race with the scheduled run.
+# Prevent overlapping runs (manual + scheduled at same time)
 concurrency:
   group: nifty-prediction
   cancel-in-progress: false
@@ -18,11 +18,10 @@ permissions:
 jobs:
   predict:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     env:
       TZ: Asia/Kolkata
-      MPLBACKEND: Agg
       PYTHONUNBUFFERED: '1'
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
 
@@ -33,13 +32,27 @@ jobs:
       - name: Validate required secrets
         env:
           GOOGLE_SECRET_JSON: ${{ secrets.GOOGLE_SECRET_JSON }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          missing=0
           if [ -z "$GOOGLE_SECRET_JSON" ]; then
             echo "::error title=Missing secret::GOOGLE_SECRET_JSON is not set"
-            echo "Add it under Settings → Secrets and variables → Actions."
+            missing=1
+          fi
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error title=Missing secret::TELEGRAM_BOT_TOKEN is not set"
+            missing=1
+          fi
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "::error title=Missing secret::TELEGRAM_CHAT_ID is not set"
+            missing=1
+          fi
+          if [ "$missing" -eq 1 ]; then
+            echo "Add missing secret(s) under Settings → Secrets and variables → Actions."
             exit 1
           fi
-          echo "Required secrets present."
+          echo "All required secrets present."
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -61,6 +74,9 @@ jobs:
           python -c "import json; json.load(open('google_secret_key.json')); print('Credentials JSON OK.')"
 
       - name: Run NIFTY prediction
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p logs
           set -o pipefail
