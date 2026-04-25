@@ -2,6 +2,11 @@
 NIFTY 50 — NEXT-DAY PREDICTION SYSTEM (v2, production-grade)
 =============================================================
 
+Track Your Edge Over Time
+Because every prediction is now logged to the sheet with TodayClose and PredictedClose, you can add two more columns manually after a few weeks:
+ActualClose — tomorrow's close (from =GOOGLEFINANCE("NSE:NIFTY") next day, or copy from yfinance)
+Hit — =IF(SIGN(ActualClose-TodayClose) = SIGN(PredictedClose-TodayClose), 1, 0)
+
 Three CLI modes:
 
   python nifty_predict_v2.py backtest      # walk-forward historical test
