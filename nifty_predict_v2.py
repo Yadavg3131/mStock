@@ -123,14 +123,15 @@ REQUIRED_TICKERS = {"NIFTY"}
 # Retry / impersonation settings for yfinance
 YF_MAX_RETRIES   = 3
 YF_RETRY_BACKOFF = 5  # seconds, doubles each retry
-YF_IMPERSONATE   = "firefox"  # firefox bypasses Yahoo's chrome-fingerprint blocks
+YF_IMPERSONATE   = "chrome"   # supported in curl_cffi 0.7.x+
 
 
 def _make_yf_session():
     """
     Build a curl_cffi browser-impersonating session for yfinance.
-    Returns None if curl_cffi isn't installed (yfinance falls back to its
-    own session, which is much more likely to get blocked by Yahoo).
+    SSL verification is disabled to handle corporate proxies that inject
+    self-signed certificates (common on office/VPN networks).
+    Returns None if curl_cffi isn't installed.
     """
     if not _HAS_CURL_CFFI:
         log.warning(
@@ -139,7 +140,9 @@ def _make_yf_session():
         )
         return None
     try:
-        return curl_requests.Session(impersonate=YF_IMPERSONATE)
+        session = curl_requests.Session(impersonate=YF_IMPERSONATE)
+        session.verify = False   # handle corporate MITM proxy certificates
+        return session
     except Exception as exc:
         log.warning("Could not create curl_cffi session (%s) — using default.", exc)
         return None
@@ -195,6 +198,8 @@ def download_data(period: str = LOOKBACK_YEARS) -> pd.DataFrame:
     log.info("Downloading %s of data for %d tickers...", period, len(TICKERS))
     if _HAS_CURL_CFFI:
         log.info("Using curl_cffi session (impersonate=%s) to bypass Yahoo bot-detection.", YF_IMPERSONATE)
+    else:
+        log.warning("curl_cffi not available — downloads may be blocked by Yahoo.")
 
     session = _make_yf_session()
     series  = {}
