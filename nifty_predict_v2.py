@@ -2,11 +2,6 @@
 NIFTY 50 — NEXT-DAY PREDICTION SYSTEM (v2, production-grade)
 =============================================================
 
-Track Your Edge Over Time
-Because every prediction is now logged to the sheet with TodayClose and PredictedClose, you can add two more columns manually after a few weeks:
-ActualClose — tomorrow's close (from =GOOGLEFINANCE("NSE:NIFTY") next day, or copy from yfinance)
-Hit — =IF(SIGN(ActualClose-TodayClose) = SIGN(PredictedClose-TodayClose), 1, 0)
-
 Three CLI modes:
 
   python nifty_predict_v2.py backtest      # walk-forward historical test
@@ -33,6 +28,7 @@ import json
 import logging
 import os
 import sys
+import time
 import warnings
 from datetime import datetime
 from typing import Optional
@@ -45,6 +41,15 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_absolute_percentage_error
+
+# curl_cffi browser-impersonating session is REQUIRED — Yahoo Finance has
+# been actively blocking the default yfinance user-agent since 2024.
+# Without this, every download returns 'Forbidden' / JSONDecodeError.
+try:
+    from curl_cffi import requests as curl_requests
+    _HAS_CURL_CFFI = True
+except ImportError:
+    _HAS_CURL_CFFI = False
 
 warnings.filterwarnings("ignore")
 
@@ -112,28 +117,116 @@ FEATURE_COLS = [
 # ============================================================
 # DATA
 # ============================================================
+# Tickers REQUIRED for the model to work (NIFTY is the target itself).
+REQUIRED_TICKERS = {"NIFTY"}
+
+# Retry / impersonation settings for yfinance
+YF_MAX_RETRIES   = 3
+YF_RETRY_BACKOFF = 5  # seconds, doubles each retry
+YF_IMPERSONATE   = "firefox"  # firefox bypasses Yahoo's chrome-fingerprint blocks
+
+
+def _make_yf_session():
+    """
+    Build a curl_cffi browser-impersonating session for yfinance.
+    Returns None if curl_cffi isn't installed (yfinance falls back to its
+    own session, which is much more likely to get blocked by Yahoo).
+    """
+    if not _HAS_CURL_CFFI:
+        log.warning(
+            "curl_cffi not installed — falling back to default yfinance session. "
+            "Yahoo Finance is likely to block this. Install with: pip install curl_cffi"
+        )
+        return None
+    try:
+        return curl_requests.Session(impersonate=YF_IMPERSONATE)
+    except Exception as exc:
+        log.warning("Could not create curl_cffi session (%s) — using default.", exc)
+        return None
+
+
+def _flatten_yf_columns(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """
+    yfinance ≥ 0.2.50 returns a MultiIndex (Price, Ticker) by default.
+    Flatten it down to single-level columns so df['Close'] always works.
+    """
+    if isinstance(df.columns, pd.MultiIndex):
+        try:
+            df = df.xs(key=ticker, axis=1, level=1)
+        except KeyError:
+            df.columns = df.columns.get_level_values(0)
+    return df
+
+
+def _download_one(ticker: str, period: str, session) -> pd.Series | None:
+    """Download one ticker with retries. Returns the close series or None."""
+    last_exc = None
+    for attempt in range(1, YF_MAX_RETRIES + 1):
+        try:
+            df = yf.download(
+                ticker,
+                period=period,
+                auto_adjust=True,
+                progress=False,
+                session=session,
+                threads=False,  # serial download is more reliable with curl_cffi
+            )
+            if df is None or df.empty:
+                last_exc = "empty response"
+                log.debug("Empty response for %s (attempt %d/%d)", ticker, attempt, YF_MAX_RETRIES)
+            else:
+                df = _flatten_yf_columns(df, ticker)
+                if "Close" not in df.columns:
+                    last_exc = f"no Close column, got: {list(df.columns)}"
+                else:
+                    return df["Close"].squeeze()
+        except Exception as exc:
+            last_exc = exc
+            log.debug("Download error for %s (attempt %d/%d): %s", ticker, attempt, YF_MAX_RETRIES, exc)
+
+        if attempt < YF_MAX_RETRIES:
+            time.sleep(YF_RETRY_BACKOFF * attempt)
+
+    log.error("  %-8s FAILED after %d retries: %s", ticker, YF_MAX_RETRIES, last_exc)
+    return None
+
+
 def download_data(period: str = LOOKBACK_YEARS) -> pd.DataFrame:
     log.info("Downloading %s of data for %d tickers...", period, len(TICKERS))
-    series = {}
-    for name, ticker in TICKERS.items():
-        try:
-            df = yf.download(ticker, period=period, auto_adjust=True, progress=False)
-            if df.empty:
-                log.warning("Empty data for %s (%s)", name, ticker)
-                continue
-            series[name] = df["Close"].squeeze()
-            log.info("  %-8s (%-12s) %d rows", name, ticker, len(df))
-        except Exception as exc:
-            log.error("  %-8s (%-12s) FAILED: %s", name, ticker, exc)
+    if _HAS_CURL_CFFI:
+        log.info("Using curl_cffi session (impersonate=%s) to bypass Yahoo bot-detection.", YF_IMPERSONATE)
 
-    if "NIFTY" not in series:
-        log.critical("NIFTY data missing — cannot continue.")
+    session = _make_yf_session()
+    series  = {}
+
+    for name, ticker in TICKERS.items():
+        close = _download_one(ticker, period, session)
+        if close is not None and len(close) > 0:
+            series[name] = close
+            log.info("  %-8s (%-12s) %d rows", name, ticker, len(close))
+        else:
+            if name in REQUIRED_TICKERS:
+                log.critical(
+                    "Required ticker '%s' (%s) failed to download. "
+                    "Check internet, upgrade yfinance, or install curl_cffi.", name, ticker
+                )
+            else:
+                log.warning("Optional ticker '%s' (%s) unavailable — feature will be zero-filled.", name, ticker)
+
+    missing_required = REQUIRED_TICKERS - set(series.keys())
+    if missing_required:
+        log.critical("Cannot continue — required tickers missing: %s", missing_required)
         sys.exit(1)
 
     df = pd.DataFrame(series)
     df.index = pd.to_datetime(df.index)
     df = df.dropna(subset=["NIFTY"]).ffill()
-    log.info("Combined dataset: %d rows × %d columns", len(df), len(df.columns))
+
+    n_loaded = len(series)
+    n_total  = len(TICKERS)
+    log.info("Combined dataset: %d rows × %d/%d tickers loaded", len(df), n_loaded, n_total)
+    if n_loaded < n_total:
+        log.warning("%d ticker(s) missing — model will use zero-filled features for those.", n_total - n_loaded)
     return df
 
 
