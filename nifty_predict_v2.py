@@ -596,6 +596,84 @@ def write_to_sheet(result: dict, metrics: dict) -> None:
 
 
 # ============================================================
+# TELEGRAM NOTIFICATION
+# ============================================================
+def send_telegram(result: dict, metrics: dict) -> None:
+    """
+    Send a concise prediction summary to a Telegram chat.
+    Requires two env vars (or GitHub Secrets):
+      TELEGRAM_BOT_TOKEN  — from @BotFather
+      TELEGRAM_CHAT_ID    — your personal or group chat ID
+    """
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id   = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+    if not bot_token or not chat_id:
+        log.warning(
+            "Telegram notification skipped — "
+            "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID env var not set."
+        )
+        return
+
+    direction   = result["direction"]
+    arrow       = "🟢 UP ▲" if direction == "UP" else "🔴 DOWN ▼"
+    conf_pct    = result["confidence"] * 100
+    within_vix  = "✅ Yes" if result["within_vix"] else "⚠️ No"
+    pnl_sign    = "+" if result["expected_move"] >= 0 else ""
+    date_label  = result["as_of_date"]
+
+    # Confidence tier label
+    if conf_pct >= 40:
+        conf_label = "🔥 HIGH"
+    elif conf_pct >= 20:
+        conf_label = "🟡 MEDIUM"
+    else:
+        conf_label = "⚪ LOW"
+
+    message = (
+        f"📊 *NIFTY 50 — Tomorrow's Prediction*\n"
+        f"📅 As of: `{date_label}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Today Close   : `{result['today_close']:,.2f}`\n"
+        f"Predicted     : `{result['predicted_close']:,.2f}`\n"
+        f"Expected Move : `{pnl_sign}{result['expected_move']:.2f}` ({pnl_sign}{result['expected_pct']:.2f}%)\n"
+        f"Direction     : {arrow}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Confidence    : {conf_label} ({conf_pct:.1f}%)\n"
+        f"Classifier    : `{result['classifier']}`\n"
+        f"P(UP)         : `{result['p_up']:.3f}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"VIX Today     : `{result['vix_today']:.2f}%`\n"
+        f"VIX Range     : `{result['vix_range_low']:,.0f}` — `{result['vix_range_high']:,.0f}`\n"
+        f"Within Range? : {within_vix}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Model Dir Acc : `{metrics['cv_dir_acc_pct']:.1f}%` (CV, {metrics['n_folds']}-fold)\n"
+        f"Model MAPE    : `{metrics['cv_mape_pct']:.2f}%`\n"
+        f"_Trained on {metrics['n_train_samples']} samples_"
+    )
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    try:
+        import requests as std_requests
+        resp = std_requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message, "parse_mode": "Markdown"},
+            timeout=15,
+            verify=False,
+        )
+        data = resp.json()
+        if data.get("ok"):
+            log.info("Telegram notification sent successfully.")
+        else:
+            log.error(
+                "Telegram API rejected the message: error_code=%s  description=%s",
+                data.get("error_code"), data.get("description"),
+            )
+    except Exception as exc:
+        log.error("Telegram notification failed: %s", exc, exc_info=True)
+
+
+# ============================================================
 # CLI
 # ============================================================
 def cmd_backtest(args):
@@ -623,6 +701,7 @@ def cmd_daily(args):
     result = predict_one(df, model)
     print_prediction(result, metrics)
     write_to_sheet(result, metrics)
+    send_telegram(result, metrics)
 
 
 def main():
