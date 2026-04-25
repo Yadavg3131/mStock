@@ -1,0 +1,82 @@
+name: NIFTY Daily Prediction
+
+on:
+  schedule:
+    # 08:30 IST (03:00 UTC), Monday–Friday — runs ~45min before NIFTY opens.
+    # Pre-market signals (S&P 500, Nikkei, DXY) are all in by this time.
+    - cron: '0 3 * * 1-5'
+  workflow_dispatch:
+
+# Don't let a manual run race with the scheduled run.
+concurrency:
+  group: nifty-prediction
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      TZ: Asia/Kolkata
+      MPLBACKEND: Agg
+      PYTHONUNBUFFERED: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets
+        env:
+          GOOGLE_SECRET_JSON: ${{ secrets.GOOGLE_SECRET_JSON }}
+        run: |
+          if [ -z "$GOOGLE_SECRET_JSON" ]; then
+            echo "::error title=Missing secret::GOOGLE_SECRET_JSON is not set"
+            echo "Add it under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          echo "Required secrets present."
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write Google service-account key
+        env:
+          GOOGLE_SECRET_JSON: ${{ secrets.GOOGLE_SECRET_JSON }}
+        run: |
+          printf '%s' "$GOOGLE_SECRET_JSON" > google_secret_key.json
+          chmod 600 google_secret_key.json
+          python -c "import json; json.load(open('google_secret_key.json')); print('Credentials JSON OK.')"
+
+      - name: Run NIFTY prediction
+        run: |
+          mkdir -p logs
+          set -o pipefail
+          python -u nifty_predict_v2.py daily 2>&1 | tee "logs/predict-$(date +%Y%m%d-%H%M%S).log"
+
+      - name: Upload run log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nifty-prediction-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Clean up credential file
+        if: always()
+        run: |
+          rm -f google_secret_key.json
+          echo "Credential file removed."
